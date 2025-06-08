@@ -1338,3 +1338,107 @@ impl Session {
     /// Get a mut pointer to the inner Session
     pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigSession { &mut self.0 }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_de_serialization() {
+        let secp = Secp256k1::new();
+
+        let keypairs = [
+            SecretKey::from_slice(&[1; 32]).unwrap().keypair(&secp),
+            SecretKey::from_slice(&[2; 32]).unwrap().keypair(&secp),
+        ];
+
+        let key_agg_cache = KeyAggCache::new(&secp, &[
+            &keypairs[0].public_key(),
+            &keypairs[1].public_key(),
+        ]);
+
+        let secrets = (
+            SessionSecretRand::assume_unique_per_nonce_gen([3; 32]),
+            SessionSecretRand::assume_unique_per_nonce_gen([4; 32]),
+        );
+
+        let message = Message::from_digest([42; 32]);
+
+        let nonces = (
+            key_agg_cache.nonce_gen(&secp, secrets.0, keypairs[0].public_key(), message, None),
+            key_agg_cache.nonce_gen(&secp, secrets.1, keypairs[1].public_key(), message, None),
+        );
+
+        assert_eq!(
+            nonces.0.1.to_string(),
+            "03f4a361abd3d50535be08421dbc73b0a8f595654ae3238afcaf2599f94e25204c036ba174214433e21f5cd0fcb14b038eb40b05b7e7c820dd21aa568fdb0a9de4d7",
+        );
+
+        assert_eq!(
+            nonces.0.1,
+            nonces.0.1.to_string().parse().unwrap(),
+        );
+
+        assert_eq!(
+            nonces.1.1.to_string(),
+            "0325efccc35d9e7adde6e664c7d23c1507684981e0e2f034d6f570aac4b53a7e8702f2571750981c96516de9224bd4cc973e636082ff41a56ed5e9a6114edfad94f0",
+        );
+
+        assert_eq!(
+            nonces.1.1,
+            nonces.1.1.to_string().parse().unwrap(),
+        );
+
+        let agg_nonce = AggregatedNonce::new(&secp, &[
+            &nonces.0.1,
+            &nonces.1.1,
+        ]);
+
+        assert_eq!(
+            agg_nonce.to_string(),
+            "0218c30fe0f567a4a9c05eb4835e2735419cf30f834c9ce2fe3430f021ba4eacd503112e97bcf6a022d236d71a9357824a2b19515f980131b3970b087cadf94cc4a7",
+        );
+
+        assert_eq!(
+            agg_nonce,
+            agg_nonce.to_string().parse().unwrap(),
+        );
+
+        let sessions = [
+            Session::new(&secp, &key_agg_cache, agg_nonce, message),
+            Session::new(&secp, &key_agg_cache, agg_nonce, message),
+        ];
+
+        let partial_signatures = [
+            sessions[0].partial_sign(&secp, nonces.0.0, &keypairs[0], &key_agg_cache),
+            sessions[1].partial_sign(&secp, nonces.1.0, &keypairs[1], &key_agg_cache),
+        ];
+
+        assert_eq!(
+            partial_signatures[0].to_string(),
+            "289eeb2f5efc314aa6d87bf58125043c96d15a007db4b6aaaac7d18086f49a99"
+        );
+
+        assert_eq!(
+            partial_signatures[1].to_string(),
+            "6d48f62ad1d3baeefbc7d25c035774c7e339f46a37e0248cbcf53674a8bce36c",
+        );
+
+        let aggregate_signatures = [
+            sessions[0].partial_sig_agg(&[
+                &partial_signatures[0],
+                &partial_signatures[1],
+            ]),
+            sessions[1].partial_sig_agg(&[
+                &partial_signatures[0],
+                &partial_signatures[1],
+            ]),
+        ];
+
+        assert_eq!(aggregate_signatures[0], aggregate_signatures[1]);
+
+        let _ = aggregate_signatures[0]
+            .verify(&secp, &key_agg_cache.agg_pk(), message.as_ref())
+            .expect("valid signature");
+    }
+}
